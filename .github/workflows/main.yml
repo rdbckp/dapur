@@ -40,33 +40,39 @@ jobs:
         cd erfan_old
         chmod -R +x scripts/
         sudo cp tools/brotli /usr/bin/brotli 2>/dev/null || true
-        # Disable ROM_resigner yang bikin SyntaxError di Python 3.x
+
+        # Disable ROM_resigner (SyntaxError di Python 3)
         sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
         sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
+
+        # FIX: mkuserimg_mke2fs.py ditulis untuk Python 2
+        # Python 3: '/' = float division → mke2fs crash karena blok desimal
+        # Fix: ganti '/' jadi '//' (integer division) di kalkulasi blocks
+        sed -i 's|blocks = int(args.fs_size) / BLOCKSIZE|blocks = int(args.fs_size) // BLOCKSIZE|g' \
+          tools/mkuserimg_mke2fs.py
+        echo "=== Verify patch mkuserimg_mke2fs.py ==="
+        grep "blocks = " tools/mkuserimg_mke2fs.py
 
     - name: Download ROM
       run: |
         mkdir -p rom_mentah
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
-    - name: Ekstrak ZIP (Odin package)
+    - name: Ekstrak ZIP → AP tar → super.img
       run: |
         mkdir -p rom_mentah/extracted
         unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/
         echo "=== Isi ZIP ==="
         ls -lh rom_mentah/extracted/
 
-    - name: Ekstrak AP_*.tar.md5 → super.img
-      run: |
         AP_FILE=$(ls rom_mentah/extracted/AP_*.tar.md5 2>/dev/null | head -1)
         if [ -z "$AP_FILE" ]; then
           echo "ERROR: AP_*.tar.md5 tidak ditemukan!"
           exit 1
         fi
-        echo "Mengekstrak: $AP_FILE"
+        echo "Ekstrak: $AP_FILE"
         tar -xf "$AP_FILE" -C rom_mentah/extracted/
 
-        # Samsung kadang pack super.img pakai lz4
         if [ -f rom_mentah/extracted/super.img.lz4 ]; then
           echo "Dekompresi super.img.lz4..."
           lz4 -d rom_mentah/extracted/super.img.lz4 rom_mentah/extracted/super.img
@@ -74,13 +80,10 @@ jobs:
         fi
 
         if [ ! -f rom_mentah/extracted/super.img ]; then
-          echo "ERROR: super.img tidak ditemukan setelah ekstrak tar!"
-          echo "=== Isi setelah ekstrak tar ==="
+          echo "ERROR: super.img tidak ditemukan!"
           ls -lh rom_mentah/extracted/
           exit 1
         fi
-
-        echo "=== super.img ditemukan, ukuran: ==="
         ls -lh rom_mentah/extracted/super.img
 
     - name: Unpack super.img → partisi
@@ -92,98 +95,115 @@ jobs:
         echo "=== Partisi hasil unpack ==="
         ls -lh rom_mentah/super_parts/
 
-    - name: Extract filesystem dari .img ke folder
+        # Handle slot suffix _a (Samsung AB-style naming)
+        for p in system product system_ext; do
+          FA="rom_mentah/super_parts/${p}_a.img"
+          F="rom_mentah/super_parts/${p}.img"
+          if [ -f "$FA" ] && [ ! -f "$F" ]; then
+            echo "Rename ${p}_a.img → ${p}.img"
+            mv "$FA" "$F"
+          fi
+        done
+
+    - name: Mount partisi ke folder
       run: |
         mkdir -p rom_mentah/fs/{system,product,system_ext}
 
-        extract_img() {
+        mount_img() {
           local IMG=$1
-          local DST=$2
+          local MNT=$2
           local NAME=$(basename "$IMG" .img)
 
           if [ ! -f "$IMG" ]; then
             echo "SKIP: $IMG tidak ada"
-            return
+            return 0
           fi
 
-          echo "=== Ekstrak $NAME ==="
+          echo "=== Mount $NAME ==="
 
-          # Cek apakah sparse image
-          MAGIC=$(xxd -l 4 "$IMG" | awk '{print $2$3}' | tr -d ' ')
-          if [ "$MAGIC" = "3aff26ed" ]; then
-            echo "  → sparse image, convert dulu ke raw..."
+          # Cek sparse image (magic 0xed26ff3a little-endian)
+          MAGIC=$(python3 -c "
+import struct
+with open('$IMG','rb') as f:
+    b = f.read(4)
+print(hex(struct.unpack('<I',b)[0]))
+" 2>/dev/null)
+          if [ "$MAGIC" = "0xed26ff3a" ]; then
+            echo "  → sparse, convert ke raw..."
             simg2img "$IMG" "${IMG}.raw"
             IMG="${IMG}.raw"
           fi
 
-          # Cek filesystem type
-          FS_TYPE=$(file "$IMG" | grep -oE 'ext[234]|erofs|f2fs' | head -1)
-          echo "  → filesystem: ${FS_TYPE:-unknown}"
+          sudo mkdir -p "$MNT"
 
-          if [[ "$FS_TYPE" == ext* ]]; then
-            # ext4: pakai debugfs (no root needed)
-            debugfs -R "rdump / $DST" "$IMG" 2>/dev/null
-          elif [ "$FS_TYPE" = "erofs" ]; then
-            # erofs: pakai fsck.erofs --extract
-            fsck.erofs --extract="$DST" "$IMG" 2>/dev/null || \
-              7z x "$IMG" -o"$DST" 2>/dev/null || true
+          # Coba ext4 dulu, fallback erofs
+          if sudo mount -t ext4 -o loop,ro "$IMG" "$MNT" 2>/dev/null; then
+            echo "  → mounted ext4 OK"
+          elif sudo mount -t erofs -o loop,ro "$IMG" "$MNT" 2>/dev/null; then
+            echo "  → mounted erofs OK"
           else
-            # Fallback: 7z
-            7z x "$IMG" -o"$DST" 2>/dev/null || true
+            echo "  → GAGAL mount $NAME"
+            return 1
           fi
-
-          echo "  → Selesai, file count: $(find "$DST" | wc -l)"
+          echo "  → file count: $(sudo find $MNT -maxdepth 1 | wc -l)"
         }
 
-        extract_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
-        extract_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
-        extract_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
+        mount_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
+        mount_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
+        mount_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
 
         echo "=== Cek build.prop ==="
-        find rom_mentah/fs/ -name "build.prop" | head -5
+        sudo find rom_mentah/fs/ -name "build.prop" 2>/dev/null | head -5
 
     - name: Siapkan source folder untuk Erfan
       run: |
-        # Erfan expect: folder dengan struktur sistem yang sudah di-extract
-        # Untuk Aonly ROM: sourcepath langsung berisi file system (setara isi system.img)
-        # Untuk AB ROM:    sourcepath berisi subfolder 'system/'
-        #
-        # Samsung A032F adalah Aonly, jadi kita pass folder system langsung
         mkdir -p rom_mentah/erfan_src
 
-        echo "Menyalin system..."
-        cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
+        echo "Copy system..."
+        sudo cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
 
-        # Merge product ke dalam system/product (symlink GSI style)
-        if [ -d rom_mentah/fs/product ] && [ "$(ls -A rom_mentah/fs/product)" ]; then
+        if mountpoint -q rom_mentah/fs/product; then
           echo "Merge product..."
-          mkdir -p rom_mentah/erfan_src/product
-          cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
+          sudo mkdir -p rom_mentah/erfan_src/product
+          sudo cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
         fi
 
-        # Merge system_ext ke dalam system/system_ext
-        if [ -d rom_mentah/fs/system_ext ] && [ "$(ls -A rom_mentah/fs/system_ext)" ]; then
+        if mountpoint -q rom_mentah/fs/system_ext; then
           echo "Merge system_ext..."
-          mkdir -p rom_mentah/erfan_src/system_ext
-          cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
+          sudo mkdir -p rom_mentah/erfan_src/system_ext
+          sudo cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
         fi
 
-        # Cek build.prop ada dan treble enabled
-        BUILD_PROP=$(find rom_mentah/erfan_src -name "build.prop" | head -1)
+        sudo umount rom_mentah/fs/system_ext 2>/dev/null || true
+        sudo umount rom_mentah/fs/product     2>/dev/null || true
+        sudo umount rom_mentah/fs/system      2>/dev/null || true
+
+        # Cari build.prop di system langsung (bukan system_ext)
+        BUILD_PROP=$(find rom_mentah/erfan_src/system -name "build.prop" 2>/dev/null | head -1)
         if [ -z "$BUILD_PROP" ]; then
-          echo "ERROR: build.prop tidak ditemukan di erfan_src!"
-          find rom_mentah/erfan_src/ | head -30
+          # Fallback cari di mana saja
+          BUILD_PROP=$(find rom_mentah/erfan_src -name "build.prop" 2>/dev/null | \
+            grep -v system_ext | head -1)
+        fi
+        if [ -z "$BUILD_PROP" ]; then
+          echo "ERROR: build.prop tidak ditemukan!"
+          find rom_mentah/erfan_src/ -maxdepth 3 | head -40
           exit 1
         fi
 
-        echo "=== build.prop ditemukan: $BUILD_PROP ==="
+        echo "=== build.prop: $BUILD_PROP ==="
         grep -E "ro.treble|ro.build.version|ro.product.device" "$BUILD_PROP" || true
 
-        # Force treble enabled (Samsung non-treble ROM tapi kita mau buat GSI)
-        if ! grep -q "ro.treble.enabled=true" "$BUILD_PROP"; then
-          echo "Inject ro.treble.enabled=true ke build.prop..."
-          sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
-          echo "ro.treble.enabled=true" >> "$BUILD_PROP"
+        # Inject treble
+        sudo sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
+        echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP" > /dev/null
+        echo "→ ro.treble.enabled=true diinjek ke $BUILD_PROP"
+
+        SIZE_KB=$(du -sk rom_mentah/erfan_src | awk '{print $1}')
+        echo "=== Ukuran erfan_src: ${SIZE_KB} KB ==="
+        if [ "$SIZE_KB" -lt 100 ]; then
+          echo "ERROR: erfan_src terlalu kecil, kemungkinan copy gagal!"
+          exit 1
         fi
 
         echo "=== Struktur erfan_src (level 2) ==="
@@ -194,8 +214,25 @@ jobs:
         cd erfan_old
         sudo bash make.sh ../rom_mentah/erfan_src/ Generic Aonly
         sudo chmod -R 777 out/
+
         echo "=== Output GSI ==="
         ls -lh out/ || true
+
+        # Validasi output
+        IMG=$(ls out/*.img 2>/dev/null | head -1)
+        if [ -z "$IMG" ]; then
+          echo "ERROR: Tidak ada .img di out/"
+          cat tmp/mkimage.log 2>/dev/null || true
+          exit 1
+        fi
+        SIZE=$(stat -c%s "$IMG")
+        echo "Output: $IMG ($SIZE bytes)"
+        if [ "$SIZE" -lt 1048576 ]; then
+          echo "ERROR: img terlalu kecil ($SIZE bytes)!"
+          cat tmp/mkimage.log 2>/dev/null || true
+          exit 1
+        fi
+        echo "BUILD SUKSES ✓"
 
     - name: Upload ke GitHub Release
       uses: softprops/action-gh-release@v2
