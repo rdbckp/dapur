@@ -19,8 +19,8 @@ jobs:
     - name: Setup Lingkungan Kerja & Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-elftools
-        pip install gdown
+        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip
+        pip3 install gdown pyelftools
 
     - name: Unduh dan Persiapkan Skrip Erfan
       run: |
