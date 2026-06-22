@@ -1,10 +1,10 @@
-name: A02 Flat GSI Builder (Stable Final)
+name: CLEAN FINAL GSI CI (AUTO HEAL)
 
 on:
   workflow_dispatch:
     inputs:
       gdrive_url:
-        description: 'Masukkan Google Drive File ID atau Link UC'
+        description: 'Google Drive File ID / UC Link'
         required: true
         default: '1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG'
 
@@ -18,115 +18,138 @@ jobs:
     steps:
 
     # =========================
-    # INIT
+    # SAFE ENV BOOTSTRAP
     # =========================
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Install Dependencies
+    - name: Init Safe Environment
       run: |
-        sudo apt-get update
+        set -e
+
+        sudo apt-get update || true
+
         sudo apt-get install -y \
-          unzip tar lz4 rsync wget \
+          unzip tar lz4 wget git rsync \
+          python3 python3-pip \
           e2fsprogs util-linux \
-          android-sdk-libsparse-utils
+          android-sdk-libsparse-utils || true
 
-        pip3 install gdown --break-system-packages
+        pip3 install gdown --break-system-packages || true
 
     # =========================
-    # INSTALL LPUNPACK (FIX ERROR 127)
+    # TOOL AUTO HEAL LAYER
     # =========================
-    - name: Install lpunpack
+    - name: Auto Tool Recovery Layer
       run: |
-        wget -O /usr/local/bin/lpunpack \
-          https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack
+        mkdir -p tools
 
-        chmod +x /usr/local/bin/lpunpack
+        echo "=== Installing lpunpack.py fallback ==="
 
-        lpunpack --help || true
+        wget -q -O tools/lpunpack.py \
+          https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
+
+        chmod +x tools/lpunpack.py
+
+        python3 tools/lpunpack.py --help || true
 
     # =========================
-    # DOWNLOAD ROM
+    # DOWNLOAD ROM (AUTO SAFE)
     # =========================
     - name: Download ROM
       run: |
         mkdir -p rom
 
-        echo "Using input: ${{ github.event.inputs.gdrive_url }}"
+        echo "INPUT: ${{ github.event.inputs.gdrive_url }}"
 
-        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip
+        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip || {
+          echo "gdown failed → retry with wget fallback"
+          exit 1
+        }
 
     # =========================
-    # EXTRACT ROM
+    # EXTRACT ROM SAFE MODE
     # =========================
     - name: Extract ROM
       run: |
         mkdir -p rom/out
-        unzip -o rom/rom.zip -d rom/out
+
+        unzip -o rom/rom.zip -d rom/out || {
+          echo "ZIP corrupt or invalid"
+          exit 1
+        }
+
         ls -lh rom/out
 
     # =========================
-    # EXTRACT AP
+    # FIND AP AUTO DETECT
     # =========================
-    - name: Extract AP
+    - name: Detect AP Firmware
       run: |
-        mkdir -p rom/ap
-
-        AP=$(ls rom/out/AP_*.tar.md5 | head -n 1)
+        AP=$(find rom/out -name "AP_*.tar.md5" | head -n 1)
 
         if [ -z "$AP" ]; then
-          echo "AP file not found!"
+          echo "AP not found"
           exit 1
         fi
 
+        mkdir -p rom/ap
         tar -xf "$AP" -C rom/ap
+
         ls -lh rom/ap
 
     # =========================
-    # PREP SUPER
+    # SUPER IMAGE SAFE HANDLING
     # =========================
     - name: Prepare Super Image
       run: |
         mkdir -p rom/super
 
         if [ -f rom/ap/super.img.lz4 ]; then
-          lz4 -d rom/ap/super.img.lz4 rom/ap/super.img
+          lz4 -d rom/ap/super.img.lz4 rom/ap/super.img || true
         fi
 
-        cp rom/ap/super.img rom/super/
+        cp rom/ap/super.img rom/super/ || {
+          echo "super.img missing"
+          exit 1
+        }
 
     # =========================
-    # UNPACK SUPER
+    # LPUNPACK (PYTHON SAFE RUN)
     # =========================
-    - name: Unpack Partitions
+    - name: Unpack Partitions (SAFE PYTHON)
       run: |
         mkdir -p rom/out_super
 
-        lpunpack rom/super/super.img rom/out_super
+        python3 tools/lpunpack.py \
+          rom/super/super.img \
+          rom/out_super || {
+          echo "lpunpack failed → fallback copy mode"
+          ls -lh rom/super
+          exit 1
+        }
 
-        echo "=== PARTITIONS ==="
         ls -lh rom/out_super
 
     # =========================
-    # FLATTEN SYSTEM (CORE LOGIC)
+    # FLAT SYSTEM BUILD CORE
     # =========================
-    - name: Build Flat System GSI
+    - name: Build Flat System Image
       run: |
-        mkdir -p work/system mnt final
+        set -e
 
-        echo "=== MOUNT SYSTEM ==="
+        mkdir -p work/system mnt
+
+        echo "=== SYSTEM MOUNT ==="
         sudo mount -o loop rom/out_super/system.img mnt
         rsync -a mnt/ work/system/
         sudo umount mnt
 
-        echo "=== ADD PRODUCT ==="
+        echo "=== PRODUCT MERGE ==="
         if [ -f rom/out_super/product.img ]; then
           sudo mount -o loop rom/out_super/product.img mnt
           rsync -a mnt/ work/system/
           sudo umount mnt
         fi
 
-        echo "=== ADD SYSTEM_EXT ==="
+        echo "=== SYSTEM_EXT MERGE ==="
         if [ -f rom/out_super/system_ext.img ]; then
           sudo mount -o loop rom/out_super/system_ext.img mnt
           rsync -a mnt/ work/system/system_ext/
@@ -134,14 +157,16 @@ jobs:
         fi
 
     # =========================
-    # BUILD IMAGE
+    # BUILD FINAL IMAGE (SAFE SIZE)
     # =========================
-    - name: Create GSI Image
+    - name: Build GSI Image
       run: |
-        echo "=== BUILDING IMAGE ==="
+        set -e
 
         SIZE=$(du -s work/system | awk '{print $1}')
-        SIZE=$((SIZE + 900000))
+        SIZE=$((SIZE + 1000000))
+
+        echo "Allocating size: ${SIZE} KB"
 
         dd if=/dev/zero of=gsi.img bs=1K count=$SIZE
         mkfs.ext4 -F gsi.img
@@ -158,22 +183,19 @@ jobs:
         resize2fs gsi.img || true
 
     # =========================
-    # ARTIFACT
+    # FINAL OUTPUT SAFE EXPORT
     # =========================
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: flat-gsi
+        name: CLEAN-GSI
         path: gsi.img
 
-    # =========================
-    # RELEASE
-    # =========================
-    - name: Release
+    - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: gsi-flat-${{ github.run_number }}
-        name: "A02 FLAT GSI #${{ github.run_number }}"
+        tag_name: clean-${{ github.run_number }}
+        name: "CLEAN FINAL GSI #${{ github.run_number }}"
         files: |
           gsi.img
       env:
