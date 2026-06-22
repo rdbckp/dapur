@@ -19,16 +19,17 @@ jobs:
     - name: Setup Lingkungan Kerja & Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip
+        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip brotli Simg2img
         pip3 install gdown pyelftools
 
     - name: Unduh Skrip Erfan via Repo ErfanoAbdi
       run: |
-        # Download tools Erfan langsung dari repo pilihan loe
         git clone https://github.com/erfanoabdi/ErfanGSIs.git erfan_old
-        
         cd erfan_old
         chmod -R +x tools/ scripts/
+        
+        # Sediakan biner brotli di system path untuk rom format .dat.br
+        sudo cp tools/brotli /usr/bin/brotli || true
         
         # Jinakkan Python Resigner lawas biar gak SyntaxError
         sed -i 's/python3 .*ROM_resigner.*/# python3 dimatikan/g' make.sh
@@ -37,25 +38,23 @@ jobs:
     - name: Download ROM Target via GDown
       run: |
         mkdir -p rom_mentah
-        # Menggunakan gdown untuk download link GDrive dari input user
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
     - name: Ekstrak & Siapkan File ROM
       run: |
-        # Ekstrak ZIP awal dari GDrive
         unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/ || true
         
-        # Jika di dalam ZIP ada super.img, kita pecah dulu pakai lpunpack biar keluar system.img-nya
+        # Jika di dalam ZIP ada super.img, kita pecah pakai lpunpack bawaan Erfan
         if [ -f rom_mentah/extracted/super.img ]; then
             chmod +x erfan_old/tools/lpunpack
             ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
         fi
 
-    - name: Mulai Proses Masak GSI (Erfan Engine)
+    - name: Mulai Proses Masak GSI (Erfan Engine dengan Sudo)
       run: |
         cd erfan_old
-        # Kita biarkan skrip make.sh yang melakukan deteksi dan ekstrak system.img secara otomatis
-        bash make.sh ../rom_mentah/extracted/ Generic Aonly
+        # WAJIB pakai sudo agar skrip bisa melakukan mount/ekstraksi filesystem img murni
+        sudo bash make.sh ../rom_mentah/extracted/ Generic Aonly
 
     - name: Unggah Hasil GSI ke GitHub Release
       uses: softprops/action-gh-release@v2
