@@ -1,4 +1,4 @@
-name: A02 Guaranteed Boot GSI Engine
+name: A02 Flat System GSI Builder
 
 on:
   workflow_dispatch:
@@ -7,6 +7,8 @@ on:
         description: 'Masukkan Link Google Drive ROM Target'
         required: true
         default: 'https://drive.google.com/file/d/1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG/view?usp=drive_link'
+
+
 
 permissions:
   contents: write
@@ -17,9 +19,6 @@ jobs:
 
     steps:
 
-    # =========================
-    # INIT
-    # =========================
     - name: Checkout
       uses: actions/checkout@v4
 
@@ -27,135 +26,88 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          aria2 p7zip-full unzip tar \
-          lz4 e2fsprogs rsync git \
+          unzip tar lz4 \
+          e2fsprogs rsync \
           android-sdk-libsparse-utils \
-          erofs-utils fuse2fs \
-          busybox
+          util-linux
 
         pip3 install gdown --break-system-packages
 
-    # =========================
-    # DOWNLOAD ROM
-    # =========================
+    # =====================
+    # DOWNLOAD
+    # =====================
     - name: Download ROM
       run: |
-        mkdir -p rom/input
-        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/input/rom.zip
+        mkdir -p rom
+        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip
 
-    # =========================
-    # EXTRACT ROM
-    # =========================
+    # =====================
+    # EXTRACT
+    # =====================
     - name: Extract ROM
       run: |
-        mkdir -p rom/extracted
-        unzip -o rom/input/rom.zip -d rom/extracted
-        ls -lh rom/extracted
+        mkdir -p rom/out
+        unzip -o rom/rom.zip -d rom/out
 
-    # =========================
+    # =====================
     # EXTRACT AP
-    # =========================
+    # =====================
     - name: Extract AP
       run: |
         mkdir -p rom/ap
-        AP=$(ls rom/extracted/AP_*.tar.md5 | head -n 1)
-
+        AP=$(ls rom/out/AP_*.tar.md5 | head -n 1)
         tar -xf "$AP" -C rom/ap
-        ls -lh rom/ap
 
-    # =========================
-    # SUPER PREP
-    # =========================
-    - name: Prepare Super
+    # =====================
+    # HANDLE SYSTEM BASE
+    # =====================
+    - name: Prepare Base System
       run: |
-        mkdir -p rom/super
+        mkdir -p work/system mnt
 
         if [ -f rom/ap/super.img.lz4 ]; then
           lz4 -d rom/ap/super.img.lz4 rom/ap/super.img
         fi
 
-        cp rom/ap/super.img rom/super/
+        cp rom/ap/super.img rom/
 
-    # =========================
-    # UNPACK SAFE MODE
-    # =========================
-    - name: Unpack Partitions (SAFE)
+        lpunpack rom/super.img rom/out_super
+
+        sudo mount -o loop rom/out_super/system.img mnt
+        rsync -a mnt/ work/system/
+        sudo umount mnt
+
+    # =====================
+    # FLATTEN PRODUCT + SYSTEM_EXT
+    # =====================
+    - name: Merge Product + SystemExt
       run: |
-        mkdir -p rom/out
+        echo "=== FLATTEN INTO SYSTEM ==="
 
-        if ! lpunpack rom/super/super.img rom/out; then
-          echo "lpunpack failed → fallback mode"
-          mkdir -p rom/out_fallback
-          cp rom/ap/system.img rom/out_fallback/ 2>/dev/null || true
-          exit 0
+        # product
+        if [ -d rom/out_super/product.img ]; then
+          mkdir -p mnt
+          sudo mount -o loop rom/out_super/product.img mnt
+          rsync -a mnt/ work/system/
+          sudo umount mnt
         fi
 
-        ls -lh rom/out
-
-    # =========================
-    # A02 SAFE ENGINE MERGE
-    # =========================
-    - name: A02 Safe Merge Engine
-      run: |
-        mkdir -p work/system final
-
-        echo "=== BASE SYSTEM ==="
-
-        if [ -d rom/out ]; then
-          BASE=rom/out/system.img
-        else
-          BASE=rom/out_fallback/system.img
+        # system_ext
+        if [ -d rom/out_super/system_ext.img ]; then
+          mkdir -p mnt
+          sudo mount -o loop rom/out_super/system_ext.img mnt
+          rsync -a mnt/ work/system/system_ext/
+          sudo umount mnt
         fi
 
-        mkdir -p mnt_sys
-        sudo mount -o loop $BASE mnt_sys || {
-          echo "mount failed → fallback copy mode"
-          mkdir -p final/system
-          cp -r rom/out/* final/system/ || true
-          exit 0
-        }
-
-        echo "=== COPY SYSTEM CORE ==="
-        rsync -a mnt_sys/ final/system/
-
-        sudo umount mnt_sys
-
-    # =========================
-    # VENDOR SAFE ISOLATION (A02 CRITICAL)
-    # =========================
-    - name: Vendor Isolation Layer
+    # =====================
+    # BUILD NEW SYSTEM IMAGE
+    # =====================
+    - name: Build System Image (FLAT GSI)
       run: |
-        mkdir -p final/vendor
+        echo "=== BUILDING FLAT SYSTEM IMAGE ==="
 
-        if [ -f rom/out/vendor.img ]; then
-          mkdir -p mnt_vendor
-          sudo mount -o loop rom/out/vendor.img mnt_vendor || true
-          rsync -a mnt_vendor/ final/vendor/
-          sudo umount mnt_vendor || true
-        fi
-
-    # =========================
-    # CRITICAL A02 FIX LAYER
-    # =========================
-    - name: A02 Fix Layer (Boot Stabilizer)
-      run: |
-        echo "=== SELINUX PERMISSIVE PATCH ==="
-
-        # remove enforcing triggers (safe boot mode)
-        find final/system -name "sepolicy*" -delete || true
-
-        echo "=== REMOVE BROKEN INIT TRIGGERS ==="
-        find final/system/etc/init -type f -name "*.rc" -exec sed -i '/avc: denied/d' {} \; || true
-
-        echo "=== TOUCHSCREEN SAFE FLAG (ILI9881X COMPAT) ==="
-        echo "boot_touch_safe=1" > final/system/build.prop
-
-    # =========================
-    # BUILD BOOTABLE IMAGE
-    # =========================
-    - name: Build GSI Image (A02 SAFE)
-      run: |
-        SIZE=$(du -s final/system | awk '{print $1}')
+        SIZE=$(du -s work/system | awk '{print $1}')
         SIZE=$((SIZE + 800000))
 
         dd if=/dev/zero of=gsi.img bs=1K count=$SIZE
@@ -164,7 +116,7 @@ jobs:
         mkdir -p mnt
         sudo mount -o loop gsi.img mnt
 
-        sudo rsync -a final/system/ mnt/
+        rsync -a work/system/ mnt/
 
         sync
         sudo umount mnt
@@ -172,23 +124,20 @@ jobs:
         e2fsck -f gsi.img || true
         resize2fs gsi.img || true
 
-    # =========================
-    # ARTIFACT
-    # =========================
-    - name: Upload GSI
+    # =====================
+    # RELEASE
+    # =====================
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: A02-GUARANTEED-GSI
+        name: flat-gsi
         path: gsi.img
 
-    # =========================
-    # RELEASE
-    # =========================
     - name: Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: a02-safe-${{ github.run_number }}
-        name: "A02 GUARANTEED BOOT GSI #${{ github.run_number }}"
+        tag_name: flat-${{ github.run_number }}
+        name: "FLAT A02 GSI #${{ github.run_number }}"
         files: |
           gsi.img
       env:
