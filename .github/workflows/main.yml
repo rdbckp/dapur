@@ -1,4 +1,4 @@
-name: CLEAN FINAL GSI CI (PERMISSION FIXED)
+name: CLEAN FINAL GSI CI (SPLIT FIX >2GB)
 
 on:
   workflow_dispatch:
@@ -17,9 +17,6 @@ jobs:
 
     steps:
 
-    # =========================
-    # INIT SAFE ENV
-    # =========================
     - name: Init Environment
       run: |
         sudo apt-get update
@@ -31,9 +28,6 @@ jobs:
 
         pip3 install gdown --break-system-packages
 
-    # =========================
-    # TOOL SETUP
-    # =========================
     - name: Install lpunpack.py
       run: |
         mkdir -p tools
@@ -43,37 +37,22 @@ jobs:
 
         chmod +x tools/lpunpack.py
 
-    # =========================
-    # DOWNLOAD ROM
-    # =========================
     - name: Download ROM
       run: |
         mkdir -p rom
-
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip
 
-    # =========================
-    # EXTRACT ROM
-    # =========================
     - name: Extract ROM
       run: |
         mkdir -p rom/out
         unzip -o rom/rom.zip -d rom/out
 
-    # =========================
-    # FIND AP
-    # =========================
     - name: Extract AP
       run: |
         mkdir -p rom/ap
-
         AP=$(find rom/out -name "AP_*.tar.md5" | head -n 1)
-
         tar -xf "$AP" -C rom/ap
 
-    # =========================
-    # PREP SUPER
-    # =========================
     - name: Prepare Super
       run: |
         mkdir -p rom/super
@@ -84,9 +63,6 @@ jobs:
 
         cp rom/ap/super.img rom/super/
 
-    # =========================
-    # UNPACK
-    # =========================
     - name: Unpack Partitions
       run: |
         mkdir -p rom/out_super
@@ -95,10 +71,7 @@ jobs:
           rom/super/super.img \
           rom/out_super
 
-    # =========================
-    # FLAT SYSTEM BUILD
-    # =========================
-    - name: Build System (FLAT)
+    - name: Build Flat System
       run: |
         mkdir -p work/system mnt
 
@@ -118,9 +91,6 @@ jobs:
           sudo umount mnt
         fi
 
-    # =========================
-    # BUILD IMAGE (FIX PERMISSION ERROR)
-    # =========================
     - name: Create GSI Image
       run: |
         SIZE=$(du -s work/system | awk '{print $1}')
@@ -130,37 +100,37 @@ jobs:
         mkfs.ext4 -F gsi.img
 
         mkdir -p mnt
-
         sudo mount -o loop gsi.img mnt
 
-        # 🔥 FIX UTAMA: SEMUA RSYNC PAKAI SUDO
         sudo rsync -a work/system/ mnt/
 
         sync
-
         sudo umount mnt
 
         e2fsck -f gsi.img || true
         resize2fs gsi.img || true
 
-    # =========================
-    # ARTIFACT
-    # =========================
-    - name: Upload
+    - name: SPLIT IMAGE (FIX 2GB LIMIT)
+      run: |
+        rm -f gsi.img.part*
+
+        split -b 1900M gsi.img gsi.img.part_
+
+        ls -lh gsi.img.part_*
+
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CLEAN-GSI-FIXED
-        path: gsi.img
+        name: gsi-split
+        path: |
+          gsi.img.part_*
 
-    # =========================
-    # RELEASE
-    # =========================
     - name: Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: fixed-${{ github.run_number }}
-        name: "CLEAN FIXED GSI #${{ github.run_number }}"
+        tag_name: gsi-${{ github.run_number }}
+        name: "GSI BUILD #${{ github.run_number }}"
         files: |
-          gsi.img
+          gsi.img.part_*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
