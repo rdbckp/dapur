@@ -6,7 +6,7 @@ on:
       gdrive_url:
         description: 'Masukkan Link Google Drive ROM Target'
         required: true
-        default: ''
+        default: 'https://drive.google.com/file/d/1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG/view?usp=drive_link'
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
         sudo apt-get install -y \
           p7zip-full aria2 squashfs-tools \
           python3-pip lz4 e2fsprogs erofs-utils \
-          android-sdk-libsparse-utils
+          android-sdk-libsparse-utils fuse2fs
         pip3 install gdown pyelftools --break-system-packages
 
     - name: Download lpunpack.py
@@ -45,12 +45,10 @@ jobs:
         sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
         sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
 
-        # FIX: mkuserimg_mke2fs.py ditulis untuk Python 2
-        # Python 3: '/' = float division → mke2fs crash karena blok desimal
-        # Fix: ganti '/' jadi '//' (integer division) di kalkulasi blocks
+        # FIX: Python 2 '/' = integer div, Python 3 '/' = float → mke2fs crash
         sed -i 's|blocks = int(args.fs_size) / BLOCKSIZE|blocks = int(args.fs_size) // BLOCKSIZE|g' \
           tools/mkuserimg_mke2fs.py
-        echo "=== Verify patch mkuserimg_mke2fs.py ==="
+        echo "=== Verify patch ==="
         grep "blocks = " tools/mkuserimg_mke2fs.py
 
     - name: Download ROM
@@ -105,13 +103,13 @@ jobs:
           fi
         done
 
-    - name: Mount partisi ke folder
+    - name: Extract filesystem dari .img ke folder (tanpa mount/root)
       run: |
         mkdir -p rom_mentah/fs/{system,product,system_ext}
 
-        mount_img() {
+        extract_img() {
           local IMG=$1
-          local MNT=$2
+          local DST=$2
           local NAME=$(basename "$IMG" .img)
 
           if [ ! -f "$IMG" ]; then
@@ -119,71 +117,88 @@ jobs:
             return 0
           fi
 
-          echo "=== Mount $NAME ==="
+          local SIZE=$(stat -c%s "$IMG")
+          echo "=== Extract $NAME ($SIZE bytes) ==="
 
-          # Cek sparse image (magic 0xed26ff3a little-endian)
-          MAGIC=$(python3 -c "
+          # Detect filesystem type dari header
+          FS=$(python3 -c "
+            import struct
+            with open('$IMG','rb') as f:
+                f.seek(1024)
+                sb = f.read(2)
+            magic = struct.unpack('<H', sb)[0] if len(sb)==2 else 0
+            print('ext4' if magic == 0xEF53 else 'other')
+            " 2>/dev/null)
+
+          # Cek erofs magic
+          EROFS_MAGIC=$(python3 -c "
             import struct
             with open('$IMG','rb') as f:
                 b = f.read(4)
             print(hex(struct.unpack('<I',b)[0]))
             " 2>/dev/null)
-          if [ "$MAGIC" = "0xed26ff3a" ]; then
-            echo "  → sparse, convert ke raw..."
-            simg2img "$IMG" "${IMG}.raw"
-            IMG="${IMG}.raw"
-          fi
 
-          sudo mkdir -p "$MNT"
+          echo "  fs hint: $FS | magic: $EROFS_MAGIC"
 
-          # Coba ext4 dulu, fallback erofs
-          if sudo mount -t ext4 -o loop,ro "$IMG" "$MNT" 2>/dev/null; then
-            echo "  → mounted ext4 OK"
-          elif sudo mount -t erofs -o loop,ro "$IMG" "$MNT" 2>/dev/null; then
-            echo "  → mounted erofs OK"
+          if [ "$EROFS_MAGIC" = "0xe2e1f5e0" ]; then
+            echo "  → erofs, pakai fsck.erofs --extract"
+            fsck.erofs --extract="$DST" "$IMG"
           else
-            echo "  → GAGAL mount $NAME"
-            return 1
+            # ext4: pakai fuse2fs (tidak butuh root/loop device)
+            echo "  → ext4, pakai fuse2fs"
+            mkdir -p "${DST}_mnt"
+            fuse2fs "$IMG" "${DST}_mnt" -o fakeroot,ro 2>/dev/null || \
+              fuse2fs "$IMG" "${DST}_mnt" -o ro 2>/dev/null
+            if mountpoint -q "${DST}_mnt"; then
+              echo "  → fuse2fs mounted OK"
+              cp -a "${DST}_mnt/." "$DST/"
+              fusermount -u "${DST}_mnt" 2>/dev/null || true
+              rmdir "${DST}_mnt" 2>/dev/null || true
+            else
+              echo "  → fuse2fs gagal, fallback debugfs rdump"
+              debugfs -R "rdump / $DST" "$IMG" 2>/dev/null || true
+            fi
           fi
-          echo "  → file count: $(sudo find $MNT -maxdepth 1 | wc -l)"
+
+          local COUNT=$(find "$DST" | wc -l)
+          echo "  → selesai, $COUNT files"
+          if [ "$COUNT" -lt 10 ]; then
+            echo "  WARNING: terlalu sedikit file di $NAME!"
+          fi
         }
 
-        mount_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
-        mount_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
-        mount_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
+        extract_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
+        extract_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
+        extract_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
 
         echo "=== Cek build.prop ==="
-        sudo find rom_mentah/fs/ -name "build.prop" 2>/dev/null | head -5
+        find rom_mentah/fs/ -name "build.prop" | head -5
 
     - name: Siapkan source folder untuk Erfan
       run: |
         mkdir -p rom_mentah/erfan_src
 
         echo "Copy system..."
-        sudo cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
+        cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
 
-        if mountpoint -q rom_mentah/fs/product; then
+        if [ -n "$(ls -A rom_mentah/fs/product 2>/dev/null)" ]; then
           echo "Merge product..."
-          sudo mkdir -p rom_mentah/erfan_src/product
-          sudo cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
+          mkdir -p rom_mentah/erfan_src/product
+          cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
         fi
 
-        if mountpoint -q rom_mentah/fs/system_ext; then
+        if [ -n "$(ls -A rom_mentah/fs/system_ext 2>/dev/null)" ]; then
           echo "Merge system_ext..."
-          sudo mkdir -p rom_mentah/erfan_src/system_ext
-          sudo cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
+          mkdir -p rom_mentah/erfan_src/system_ext
+          cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
         fi
 
-        sudo umount rom_mentah/fs/system_ext 2>/dev/null || true
-        sudo umount rom_mentah/fs/product     2>/dev/null || true
-        sudo umount rom_mentah/fs/system      2>/dev/null || true
-
-        # Cari build.prop di system langsung (bukan system_ext)
-        BUILD_PROP=$(find rom_mentah/erfan_src/system -name "build.prop" 2>/dev/null | head -1)
+        # Cari build.prop utama (di system/, bukan system_ext/)
+        BUILD_PROP=$(find rom_mentah/erfan_src/system -name "build.prop" 2>/dev/null | \
+          grep -v "system_ext\|product" | head -1)
         if [ -z "$BUILD_PROP" ]; then
-          # Fallback cari di mana saja
           BUILD_PROP=$(find rom_mentah/erfan_src -name "build.prop" 2>/dev/null | \
-            grep -v system_ext | head -1)
+            grep -v "system_ext\|product" | head -1)
         fi
         if [ -z "$BUILD_PROP" ]; then
           echo "ERROR: build.prop tidak ditemukan!"
@@ -194,15 +209,15 @@ jobs:
         echo "=== build.prop: $BUILD_PROP ==="
         grep -E "ro.treble|ro.build.version|ro.product.device" "$BUILD_PROP" || true
 
-        # Inject treble
-        sudo sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
-        echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP" > /dev/null
-        echo "→ ro.treble.enabled=true diinjek ke $BUILD_PROP"
+        # Inject treble enabled
+        sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
+        echo "ro.treble.enabled=true" >> "$BUILD_PROP"
+        echo "→ ro.treble.enabled=true diinjek"
 
         SIZE_KB=$(du -sk rom_mentah/erfan_src | awk '{print $1}')
         echo "=== Ukuran erfan_src: ${SIZE_KB} KB ==="
-        if [ "$SIZE_KB" -lt 100 ]; then
-          echo "ERROR: erfan_src terlalu kecil, kemungkinan copy gagal!"
+        if [ "$SIZE_KB" -lt 1000 ]; then
+          echo "ERROR: erfan_src terlalu kecil!"
           exit 1
         fi
 
@@ -218,7 +233,6 @@ jobs:
         echo "=== Output GSI ==="
         ls -lh out/ || true
 
-        # Validasi output
         IMG=$(ls out/*.img 2>/dev/null | head -1)
         if [ -z "$IMG" ]; then
           echo "ERROR: Tidak ada .img di out/"
