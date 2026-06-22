@@ -1,71 +1,144 @@
-name: GSI Baker Manual Run
+name: Samsung GSI Builder Full Auto
 
 on:
   workflow_dispatch:
     inputs:
       gdrive_url:
-        description: 'Masukkan Link Google Drive ROM Target'
+        description: 'Google Drive ROM Samsung'
         required: true
-        default: 'https://drive.google.com/file/d/1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG/view?usp=drive_link'
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-gsi:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Repository
+    # =========================
+    # INIT
+    # =========================
+    - name: Checkout Repo
       uses: actions/checkout@v4
 
-    - name: Setup Dependencies
+    - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          p7zip-full \
-          aria2 \
-          squashfs-tools \
-          python3-pip \
-          lz4 \
-          e2fsprogs \
-          erofs-utils \
+          aria2 p7zip-full unzip tar \
+          lz4 e2fsprogs squashfs-tools \
+          python3-pip git \
           android-sdk-libsparse-utils \
-          fuse2fs \
-          unzip
+          erofs-utils fuse2fs
 
-        pip3 install gdown pyelftools --break-system-packages
+        pip3 install gdown --break-system-packages
 
-    - name: Download lpunpack.py
-      run: |
-        curl -sL "https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py" \
-          -o /usr/local/bin/lpunpack.py
-        chmod +x /usr/local/bin/lpunpack.py
-
-    - name: Clone Erfan GSI Tools
-      run: |
-        git clone https://github.com/erfanoabdi/ErfanGSIs.git erfan_old
-        cd erfan_old
-        chmod -R +x scripts/
-        sudo cp tools/brotli /usr/bin/brotli 2>/dev/null || true
-
-        # Disable ROM_resigner (SyntaxError di Python 3)
-        sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
-        sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
-
-        # FIX: Python division issue
-        sed -i 's|blocks = int(args.fs_size) / BLOCKSIZE|blocks = int(args.fs_size) // BLOCKSIZE|g' \
-          tools/mkuserimg_mke2fs.py
-
-        echo "=== Verify patch ==="
-        grep "blocks = " tools/mkuserimg_mke2fs.py
-
+    # =========================
+    # DOWNLOAD ROM
+    # =========================
     - name: Download ROM
       run: |
-        mkdir -p rom_mentah
-        gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
+        mkdir -p rom/input
+        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/input/rom.zip
 
-    - name: Extract ROM
+    # =========================
+    # EXTRACT ZIP
+    # =========================
+    - name: Extract ROM ZIP
       run: |
-        mkdir -p rom_mentah/extracted
-        unzip -o rom_mentah/target_rom.zip -d rom_mentah/extracted/
+        mkdir -p rom/extracted
+        unzip -o rom/input/rom.zip -d rom/extracted
+        ls -lh rom/extracted
+
+    # =========================
+    # EXTRACT AP TAR
+    # =========================
+    - name: Extract AP Firmware
+      run: |
+        mkdir -p rom/ap
+        AP_FILE=$(ls rom/extracted/AP_*.tar.md5 | head -n 1)
+
+        if [ -z "$AP_FILE" ]; then
+          echo "AP file not found!"
+          exit 1
+        fi
+
+        tar -xf "$AP_FILE" -C rom/ap
+        ls -lh rom/ap
+
+    # =========================
+    # HANDLE SUPER.IMG
+    # =========================
+    - name: Prepare Super Image
+      run: |
+        mkdir -p rom/super
+
+        if [ -f rom/ap/super.img.lz4 ]; then
+          echo "Decompressing LZ4..."
+          lz4 -d rom/ap/super.img.lz4 rom/ap/super.img
+        fi
+
+        if [ ! -f rom/ap/super.img ]; then
+          echo "super.img not found!"
+          ls -lh rom/ap
+          exit 1
+        fi
+
+        cp rom/ap/super.img rom/super/
+
+    # =========================
+    # UNPACK SUPER
+    # =========================
+    - name: Unpack Super Image
+      run: |
+        mkdir -p rom/super_out
+        lpunpack rom/super/super.img rom/super_out
+
+        echo "=== PARTITIONS ==="
+        ls -lh rom/super_out
+
+    # =========================
+    # BUILD GSI (CORE STAGE)
+    # =========================
+    - name: Build GSI Image
+      run: |
+        mkdir -p output
+
+        echo "=== Using system.img as base GSI ==="
+
+        if [ ! -f rom/super_out/system.img ]; then
+          echo "system.img not found!"
+          ls -lh rom/super_out
+          exit 1
+        fi
+
+        # COPY BASE SYSTEM
+        cp rom/super_out/system.img output/gsi.img
+
+        # OPTIONAL: resize / cleanup
+        e2fsck -f output/gsi.img || true
+        resize2fs output/gsi.img || true
+
+        echo "GSI READY"
+
+    # =========================
+    # ARTIFACT UPLOAD
+    # =========================
+    - name: Upload GSI Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gsi-image
+        path: output/gsi.img
+
+    # =========================
+    # RELEASE
+    # =========================
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: gsi-${{ github.run_number }}
+        name: "Samsung GSI Build #${{ github.run_number }}"
+        files: |
+          output/gsi.img
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
