@@ -23,9 +23,17 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          p7zip-full aria2 squashfs-tools \
-          python3-pip lz4 e2fsprogs erofs-utils \
-          android-sdk-libsparse-utils fuse2fs
+          p7zip-full \
+          aria2 \
+          squashfs-tools \
+          python3-pip \
+          lz4 \
+          e2fsprogs \
+          erofs-utils \
+          android-sdk-libsparse-utils \
+          fuse2fs \
+          unzip
+
         pip3 install gdown pyelftools --break-system-packages
 
     - name: Download lpunpack.py
@@ -45,9 +53,10 @@ jobs:
         sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
         sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
 
-        # FIX: Python 2 '/' = integer div, Python 3 '/' = float → mke2fs crash
+        # FIX: Python division issue
         sed -i 's|blocks = int(args.fs_size) / BLOCKSIZE|blocks = int(args.fs_size) // BLOCKSIZE|g' \
           tools/mkuserimg_mke2fs.py
+
         echo "=== Verify patch ==="
         grep "blocks = " tools/mkuserimg_mke2fs.py
 
@@ -56,203 +65,7 @@ jobs:
         mkdir -p rom_mentah
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
-    - name: Ekstrak ZIP → AP tar → super.img
+    - name: Extract ROM
       run: |
         mkdir -p rom_mentah/extracted
-        unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/
-        echo "=== Isi ZIP ==="
-        ls -lh rom_mentah/extracted/
-
-        AP_FILE=$(ls rom_mentah/extracted/AP_*.tar.md5 2>/dev/null | head -1)
-        if [ -z "$AP_FILE" ]; then
-          echo "ERROR: AP_*.tar.md5 tidak ditemukan!"
-          exit 1
-        fi
-        echo "Ekstrak: $AP_FILE"
-        tar -xf "$AP_FILE" -C rom_mentah/extracted/
-
-        if [ -f rom_mentah/extracted/super.img.lz4 ]; then
-          echo "Dekompresi super.img.lz4..."
-          lz4 -d rom_mentah/extracted/super.img.lz4 rom_mentah/extracted/super.img
-          rm rom_mentah/extracted/super.img.lz4
-        fi
-
-        if [ ! -f rom_mentah/extracted/super.img ]; then
-          echo "ERROR: super.img tidak ditemukan!"
-          ls -lh rom_mentah/extracted/
-          exit 1
-        fi
-        ls -lh rom_mentah/extracted/super.img
-
-    - name: Unpack super.img → partisi
-      run: |
-        mkdir -p rom_mentah/super_parts
-        python3 /usr/local/bin/lpunpack.py \
-          rom_mentah/extracted/super.img \
-          rom_mentah/super_parts/
-        echo "=== Partisi hasil unpack ==="
-        ls -lh rom_mentah/super_parts/
-
-        # Handle slot suffix _a (Samsung AB-style naming)
-        for p in system product system_ext; do
-          FA="rom_mentah/super_parts/${p}_a.img"
-          F="rom_mentah/super_parts/${p}.img"
-          if [ -f "$FA" ] && [ ! -f "$F" ]; then
-            echo "Rename ${p}_a.img → ${p}.img"
-            mv "$FA" "$F"
-          fi
-        done
-
-    - name: Extract filesystem dari .img ke folder (tanpa mount/root)
-      run: |
-        mkdir -p rom_mentah/fs/{system,product,system_ext}
-
-        extract_img() {
-          local IMG=$1
-          local DST=$2
-          local NAME=$(basename "$IMG" .img)
-
-          if [ ! -f "$IMG" ]; then
-            echo "SKIP: $IMG tidak ada"
-            return 0
-          fi
-
-          local SIZE=$(stat -c%s "$IMG")
-          echo "=== Extract $NAME ($SIZE bytes) ==="
-
-          # Detect filesystem type dari header
-          FS=$(python3 -c "
-            import struct
-            with open('$IMG','rb') as f:
-                f.seek(1024)
-                sb = f.read(2)
-            magic = struct.unpack('<H', sb)[0] if len(sb)==2 else 0
-            print('ext4' if magic == 0xEF53 else 'other')
-            " 2>/dev/null)
-
-          # Cek erofs magic
-          EROFS_MAGIC=$(python3 -c "
-            import struct
-            with open('$IMG','rb') as f:
-                b = f.read(4)
-            print(hex(struct.unpack('<I',b)[0]))
-            " 2>/dev/null)
-
-          echo "  fs hint: $FS | magic: $EROFS_MAGIC"
-
-          if [ "$EROFS_MAGIC" = "0xe2e1f5e0" ]; then
-            echo "  → erofs, pakai fsck.erofs --extract"
-            fsck.erofs --extract="$DST" "$IMG"
-          else
-            # ext4: pakai fuse2fs (tidak butuh root/loop device)
-            echo "  → ext4, pakai fuse2fs"
-            mkdir -p "${DST}_mnt"
-            fuse2fs "$IMG" "${DST}_mnt" -o fakeroot,ro 2>/dev/null || \
-              fuse2fs "$IMG" "${DST}_mnt" -o ro 2>/dev/null
-            if mountpoint -q "${DST}_mnt"; then
-              echo "  → fuse2fs mounted OK"
-              cp -a "${DST}_mnt/." "$DST/"
-              fusermount -u "${DST}_mnt" 2>/dev/null || true
-              rmdir "${DST}_mnt" 2>/dev/null || true
-            else
-              echo "  → fuse2fs gagal, fallback debugfs rdump"
-              debugfs -R "rdump / $DST" "$IMG" 2>/dev/null || true
-            fi
-          fi
-
-          local COUNT=$(find "$DST" | wc -l)
-          echo "  → selesai, $COUNT files"
-          if [ "$COUNT" -lt 10 ]; then
-            echo "  WARNING: terlalu sedikit file di $NAME!"
-          fi
-        }
-
-        extract_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
-        extract_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
-        extract_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
-
-        echo "=== Cek build.prop ==="
-        find rom_mentah/fs/ -name "build.prop" | head -5
-
-    - name: Siapkan source folder untuk Erfan
-      run: |
-        mkdir -p rom_mentah/erfan_src
-
-        echo "Copy system..."
-        cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
-
-        if [ -n "$(ls -A rom_mentah/fs/product 2>/dev/null)" ]; then
-          echo "Merge product..."
-          mkdir -p rom_mentah/erfan_src/product
-          cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
-        fi
-
-        if [ -n "$(ls -A rom_mentah/fs/system_ext 2>/dev/null)" ]; then
-          echo "Merge system_ext..."
-          mkdir -p rom_mentah/erfan_src/system_ext
-          cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
-        fi
-
-        # Cari build.prop utama (di system/, bukan system_ext/)
-        BUILD_PROP=$(find rom_mentah/erfan_src/system -name "build.prop" 2>/dev/null | \
-          grep -v "system_ext\|product" | head -1)
-        if [ -z "$BUILD_PROP" ]; then
-          BUILD_PROP=$(find rom_mentah/erfan_src -name "build.prop" 2>/dev/null | \
-            grep -v "system_ext\|product" | head -1)
-        fi
-        if [ -z "$BUILD_PROP" ]; then
-          echo "ERROR: build.prop tidak ditemukan!"
-          find rom_mentah/erfan_src/ -maxdepth 3 | head -40
-          exit 1
-        fi
-
-        echo "=== build.prop: $BUILD_PROP ==="
-        grep -E "ro.treble|ro.build.version|ro.product.device" "$BUILD_PROP" || true
-
-        # Inject treble enabled
-        sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
-        echo "ro.treble.enabled=true" >> "$BUILD_PROP"
-        echo "→ ro.treble.enabled=true diinjek"
-
-        SIZE_KB=$(du -sk rom_mentah/erfan_src | awk '{print $1}')
-        echo "=== Ukuran erfan_src: ${SIZE_KB} KB ==="
-        if [ "$SIZE_KB" -lt 1000 ]; then
-          echo "ERROR: erfan_src terlalu kecil!"
-          exit 1
-        fi
-
-        echo "=== Struktur erfan_src (level 2) ==="
-        find rom_mentah/erfan_src -maxdepth 2 -type d | head -30
-
-    - name: Masak GSI dengan Erfan
-      run: |
-        cd erfan_old
-        sudo bash make.sh ../rom_mentah/erfan_src/ Generic Aonly
-        sudo chmod -R 777 out/
-
-        echo "=== Output GSI ==="
-        ls -lh out/ || true
-
-        IMG=$(ls out/*.img 2>/dev/null | head -1)
-        if [ -z "$IMG" ]; then
-          echo "ERROR: Tidak ada .img di out/"
-          cat tmp/mkimage.log 2>/dev/null || true
-          exit 1
-        fi
-        SIZE=$(stat -c%s "$IMG")
-        echo "Output: $IMG ($SIZE bytes)"
-        if [ "$SIZE" -lt 1048576 ]; then
-          echo "ERROR: img terlalu kecil ($SIZE bytes)!"
-          cat tmp/mkimage.log 2>/dev/null || true
-          exit 1
-        fi
-        echo "BUILD SUKSES ✓"
-
-    - name: Upload ke GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: erfan_old/out/*.img
-        tag_name: GSI-${{ github.run_number }}
-        name: GSI Build #${{ github.run_number }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        unzip -o rom_mentah/target_rom.zip -d rom_mentah/extracted/
