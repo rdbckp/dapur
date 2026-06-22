@@ -22,15 +22,25 @@ jobs:
     - name: Setup Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip lz4
-        pip3 install gdown pyelftools
+        sudo apt-get install -y \
+          p7zip-full aria2 squashfs-tools \
+          python3-pip lz4 e2fsprogs erofs-utils \
+          android-sdk-libsparse-utils
+        pip3 install gdown pyelftools --break-system-packages
+
+    - name: Download lpunpack.py
+      run: |
+        curl -sL "https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py" \
+          -o /usr/local/bin/lpunpack.py
+        chmod +x /usr/local/bin/lpunpack.py
 
     - name: Clone Erfan GSI Tools
       run: |
         git clone https://github.com/erfanoabdi/ErfanGSIs.git erfan_old
         cd erfan_old
-        chmod -R +x tools/ scripts/
-        sudo cp tools/brotli /usr/bin/brotli || true
+        chmod -R +x scripts/
+        sudo cp tools/brotli /usr/bin/brotli 2>/dev/null || true
+        # Disable ROM_resigner yang bikin SyntaxError di Python 3.x
         sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
         sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
 
@@ -39,17 +49,15 @@ jobs:
         mkdir -p rom_mentah
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
-    - name: Ekstrak ZIP → tar.md5 → super.img → partisi
+    - name: Ekstrak ZIP (Odin package)
       run: |
         mkdir -p rom_mentah/extracted
-
-        # Step 1: unzip Odin package
         unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/
-
         echo "=== Isi ZIP ==="
         ls -lh rom_mentah/extracted/
 
-        # Step 2: ekstrak AP_*.tar.md5 → dapat super.img
+    - name: Ekstrak AP_*.tar.md5 → super.img
+      run: |
         AP_FILE=$(ls rom_mentah/extracted/AP_*.tar.md5 2>/dev/null | head -1)
         if [ -z "$AP_FILE" ]; then
           echo "ERROR: AP_*.tar.md5 tidak ditemukan!"
@@ -58,42 +66,134 @@ jobs:
         echo "Mengekstrak: $AP_FILE"
         tar -xf "$AP_FILE" -C rom_mentah/extracted/
 
-        echo "=== Setelah ekstrak tar ==="
-        ls -lh rom_mentah/extracted/
-
-        # Step 3: dekompresi super.img.lz4 kalau ada (Samsung kadang pack lz4)
+        # Samsung kadang pack super.img pakai lz4
         if [ -f rom_mentah/extracted/super.img.lz4 ]; then
           echo "Dekompresi super.img.lz4..."
           lz4 -d rom_mentah/extracted/super.img.lz4 rom_mentah/extracted/super.img
           rm rom_mentah/extracted/super.img.lz4
         fi
 
-        # Step 4: lpunpack super.img → system.img, product.img, system_ext.img
         if [ ! -f rom_mentah/extracted/super.img ]; then
           echo "ERROR: super.img tidak ditemukan setelah ekstrak tar!"
+          echo "=== Isi setelah ekstrak tar ==="
+          ls -lh rom_mentah/extracted/
           exit 1
         fi
-        echo "Unpacking super.img..."
-        chmod +x erfan_old/tools/lpunpack
-        ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
 
-        echo "=== Setelah lpunpack ==="
-        ls -lh rom_mentah/extracted/*.img || true
+        echo "=== super.img ditemukan, ukuran: ==="
+        ls -lh rom_mentah/extracted/super.img
 
-        # Validasi partisi wajib ada
-        for img in system.img product.img system_ext.img; do
-          if [ ! -f "rom_mentah/extracted/$img" ]; then
-            echo "WARNING: $img tidak ditemukan, mungkin nama partisi beda"
+    - name: Unpack super.img → partisi
+      run: |
+        mkdir -p rom_mentah/super_parts
+        python3 /usr/local/bin/lpunpack.py \
+          rom_mentah/extracted/super.img \
+          rom_mentah/super_parts/
+        echo "=== Partisi hasil unpack ==="
+        ls -lh rom_mentah/super_parts/
+
+    - name: Extract filesystem dari .img ke folder
+      run: |
+        mkdir -p rom_mentah/fs/{system,product,system_ext}
+
+        extract_img() {
+          local IMG=$1
+          local DST=$2
+          local NAME=$(basename "$IMG" .img)
+
+          if [ ! -f "$IMG" ]; then
+            echo "SKIP: $IMG tidak ada"
+            return
           fi
-        done
 
-    - name: Masak GSI
+          echo "=== Ekstrak $NAME ==="
+
+          # Cek apakah sparse image
+          MAGIC=$(xxd -l 4 "$IMG" | awk '{print $2$3}' | tr -d ' ')
+          if [ "$MAGIC" = "3aff26ed" ]; then
+            echo "  → sparse image, convert dulu ke raw..."
+            simg2img "$IMG" "${IMG}.raw"
+            IMG="${IMG}.raw"
+          fi
+
+          # Cek filesystem type
+          FS_TYPE=$(file "$IMG" | grep -oE 'ext[234]|erofs|f2fs' | head -1)
+          echo "  → filesystem: ${FS_TYPE:-unknown}"
+
+          if [[ "$FS_TYPE" == ext* ]]; then
+            # ext4: pakai debugfs (no root needed)
+            debugfs -R "rdump / $DST" "$IMG" 2>/dev/null
+          elif [ "$FS_TYPE" = "erofs" ]; then
+            # erofs: pakai fsck.erofs --extract
+            fsck.erofs --extract="$DST" "$IMG" 2>/dev/null || \
+              7z x "$IMG" -o"$DST" 2>/dev/null || true
+          else
+            # Fallback: 7z
+            7z x "$IMG" -o"$DST" 2>/dev/null || true
+          fi
+
+          echo "  → Selesai, file count: $(find "$DST" | wc -l)"
+        }
+
+        extract_img "rom_mentah/super_parts/system.img"     "rom_mentah/fs/system"
+        extract_img "rom_mentah/super_parts/product.img"    "rom_mentah/fs/product"
+        extract_img "rom_mentah/super_parts/system_ext.img" "rom_mentah/fs/system_ext"
+
+        echo "=== Cek build.prop ==="
+        find rom_mentah/fs/ -name "build.prop" | head -5
+
+    - name: Siapkan source folder untuk Erfan
+      run: |
+        # Erfan expect: folder dengan struktur sistem yang sudah di-extract
+        # Untuk Aonly ROM: sourcepath langsung berisi file system (setara isi system.img)
+        # Untuk AB ROM:    sourcepath berisi subfolder 'system/'
+        #
+        # Samsung A032F adalah Aonly, jadi kita pass folder system langsung
+        mkdir -p rom_mentah/erfan_src
+
+        echo "Menyalin system..."
+        cp -a rom_mentah/fs/system/. rom_mentah/erfan_src/
+
+        # Merge product ke dalam system/product (symlink GSI style)
+        if [ -d rom_mentah/fs/product ] && [ "$(ls -A rom_mentah/fs/product)" ]; then
+          echo "Merge product..."
+          mkdir -p rom_mentah/erfan_src/product
+          cp -a rom_mentah/fs/product/. rom_mentah/erfan_src/product/
+        fi
+
+        # Merge system_ext ke dalam system/system_ext
+        if [ -d rom_mentah/fs/system_ext ] && [ "$(ls -A rom_mentah/fs/system_ext)" ]; then
+          echo "Merge system_ext..."
+          mkdir -p rom_mentah/erfan_src/system_ext
+          cp -a rom_mentah/fs/system_ext/. rom_mentah/erfan_src/system_ext/
+        fi
+
+        # Cek build.prop ada dan treble enabled
+        BUILD_PROP=$(find rom_mentah/erfan_src -name "build.prop" | head -1)
+        if [ -z "$BUILD_PROP" ]; then
+          echo "ERROR: build.prop tidak ditemukan di erfan_src!"
+          find rom_mentah/erfan_src/ | head -30
+          exit 1
+        fi
+
+        echo "=== build.prop ditemukan: $BUILD_PROP ==="
+        grep -E "ro.treble|ro.build.version|ro.product.device" "$BUILD_PROP" || true
+
+        # Force treble enabled (Samsung non-treble ROM tapi kita mau buat GSI)
+        if ! grep -q "ro.treble.enabled=true" "$BUILD_PROP"; then
+          echo "Inject ro.treble.enabled=true ke build.prop..."
+          sed -i '/ro.treble.enabled/d' "$BUILD_PROP"
+          echo "ro.treble.enabled=true" >> "$BUILD_PROP"
+        fi
+
+        echo "=== Struktur erfan_src (level 2) ==="
+        find rom_mentah/erfan_src -maxdepth 2 -type d | head -30
+
+    - name: Masak GSI dengan Erfan
       run: |
         cd erfan_old
-        # Erfan otomatis detect & merge product + system_ext kalau ada di folder source
-        sudo bash make.sh ../rom_mentah/extracted/ Generic Aonly
+        sudo bash make.sh ../rom_mentah/erfan_src/ Generic Aonly
         sudo chmod -R 777 out/
-
         echo "=== Output GSI ==="
         ls -lh out/ || true
 
