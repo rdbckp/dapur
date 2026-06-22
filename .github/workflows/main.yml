@@ -22,11 +22,9 @@ jobs:
         sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip
         pip3 install gdown pyelftools
 
-    - name: Unduh dan Persiapkan Skrip Erfan
+    - name: Persiapkan Skrip Erfan Dapur Lokal
       run: |
-        # Kloning repo ErfanGSI resmi langsung ke folder erfan_old
-        git clone --recurse-submodules https://github.com/erfanAbdi/ErfanGSI.git erfan_old
-        
+        # Menggunakan folder erfan_old yang sudah ada di repo loe (seperti di codespace)
         cd erfan_old
         chmod -R +x tools/ scripts/
         
@@ -51,7 +49,7 @@ jobs:
         if [ -f rom_mentah/extracted/system.img ]; then
             7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
         elif [ -f rom_mentah/extracted/super.img ]; then
-            # Menggunakan lpunpack bawaan Erfan tools untuk memecah super.img
+            # Menggunakan lpunpack bawaan dapur lokal loe
             chmod +x erfan_old/tools/lpunpack
             ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
             7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
