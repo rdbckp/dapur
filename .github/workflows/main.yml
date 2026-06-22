@@ -22,9 +22,9 @@ jobs:
         sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip
         pip3 install gdown pyelftools
 
-    - name: Unduh Skrip Erfan via Mirror Public
+    - name: Unduh Skrip Erfan via Repo ErfanoAbdi
       run: |
-        # Download tools Erfan dari mirror publik yang aktif agar aman dari private repo
+        # Download tools Erfan langsung dari repo pilihan loe
         git clone https://github.com/erfanoabdi/ErfanGSIs.git erfan_old
         
         cd erfan_old
@@ -40,28 +40,21 @@ jobs:
         # Menggunakan gdown untuk download link GDrive dari input user
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
-    - name: Ekstrak & Bedah ROM
+    - name: Ekstrak & Siapkan File ROM
       run: |
+        # Ekstrak ZIP awal dari GDrive
         unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/ || true
         
-        # Membuat folder struktur kerja Erfan secara manual
-        mkdir -p erfan_old/tmp/system
-        
-        # Logika ekstraksi manual system.img atau super.img ke tmp Erfan
-        if [ -f rom_mentah/extracted/system.img ]; then
-            7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
-        elif [ -f rom_mentah/extracted/super.img ]; then
+        # Jika di dalam ZIP ada super.img, kita pecah dulu pakai lpunpack biar keluar system.img-nya
+        if [ -f rom_mentah/extracted/super.img ]; then
             chmod +x erfan_old/tools/lpunpack
             ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
-            7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
         fi
-        
-        # Buat folder init cadangan agar skrip tidak error saat patching
-        mkdir -p erfan_old/tmp/system/system/etc/init/
 
     - name: Mulai Proses Masak GSI (Erfan Engine)
       run: |
         cd erfan_old
+        # Kita biarkan skrip make.sh yang melakukan deteksi dan ekstrak system.img secara otomatis
         bash make.sh ../rom_mentah/extracted/ Generic Aonly
 
     - name: Unggah Hasil GSI ke GitHub Release
