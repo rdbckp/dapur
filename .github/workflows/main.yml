@@ -8,6 +8,9 @@ on:
         required: true
         default: ''
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,54 +19,89 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Setup Lingkungan Kerja & Dependencies
+    - name: Setup Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip
+        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip lz4
         pip3 install gdown pyelftools
 
-    - name: Unduh Skrip Erfan via Repo ErfanoAbdi
+    - name: Clone Erfan GSI Tools
       run: |
         git clone https://github.com/erfanoabdi/ErfanGSIs.git erfan_old
         cd erfan_old
         chmod -R +x tools/ scripts/
-        
-        # Sediakan biner brotli di system path untuk rom format .dat.br
         sudo cp tools/brotli /usr/bin/brotli || true
-        
-        # Jinakkan Python Resigner lawas biar gak SyntaxError
-        sed -i 's/python3 .*ROM_resigner.*/# python3 dimatikan/g' make.sh
-        sed -i 's/python .*ROM_resigner.*/# python dimatikan/g' make.sh
+        sed -i 's/python3 .*ROM_resigner.*/# dimatikan/g' make.sh
+        sed -i 's/python .*ROM_resigner.*/# dimatikan/g' make.sh
 
-    - name: Download ROM Target via GDown
+    - name: Download ROM
       run: |
         mkdir -p rom_mentah
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
 
-    - name: Ekstrak & Siapkan File ROM
+    - name: Ekstrak ZIP → tar.md5 → super.img → partisi
       run: |
-        unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/ || true
-        
-        # Jika di dalam ZIP ada super.img, kita pecah pakai lpunpack bawaan Erfan
-        if [ -f rom_mentah/extracted/super.img ]; then
-            chmod +x erfan_old/tools/lpunpack
-            ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
+        mkdir -p rom_mentah/extracted
+
+        # Step 1: unzip Odin package
+        unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/
+
+        echo "=== Isi ZIP ==="
+        ls -lh rom_mentah/extracted/
+
+        # Step 2: ekstrak AP_*.tar.md5 → dapat super.img
+        AP_FILE=$(ls rom_mentah/extracted/AP_*.tar.md5 2>/dev/null | head -1)
+        if [ -z "$AP_FILE" ]; then
+          echo "ERROR: AP_*.tar.md5 tidak ditemukan!"
+          exit 1
+        fi
+        echo "Mengekstrak: $AP_FILE"
+        tar -xf "$AP_FILE" -C rom_mentah/extracted/
+
+        echo "=== Setelah ekstrak tar ==="
+        ls -lh rom_mentah/extracted/
+
+        # Step 3: dekompresi super.img.lz4 kalau ada (Samsung kadang pack lz4)
+        if [ -f rom_mentah/extracted/super.img.lz4 ]; then
+          echo "Dekompresi super.img.lz4..."
+          lz4 -d rom_mentah/extracted/super.img.lz4 rom_mentah/extracted/super.img
+          rm rom_mentah/extracted/super.img.lz4
         fi
 
-    - name: Mulai Proses Masak GSI (Erfan Engine dengan Sudo)
+        # Step 4: lpunpack super.img → system.img, product.img, system_ext.img
+        if [ ! -f rom_mentah/extracted/super.img ]; then
+          echo "ERROR: super.img tidak ditemukan setelah ekstrak tar!"
+          exit 1
+        fi
+        echo "Unpacking super.img..."
+        chmod +x erfan_old/tools/lpunpack
+        ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
+
+        echo "=== Setelah lpunpack ==="
+        ls -lh rom_mentah/extracted/*.img || true
+
+        # Validasi partisi wajib ada
+        for img in system.img product.img system_ext.img; do
+          if [ ! -f "rom_mentah/extracted/$img" ]; then
+            echo "WARNING: $img tidak ditemukan, mungkin nama partisi beda"
+          fi
+        done
+
+    - name: Masak GSI
       run: |
         cd erfan_old
-        # WAJIB pakai sudo agar skrip bisa melakukan mount/ekstraksi filesystem img murni
+        # Erfan otomatis detect & merge product + system_ext kalau ada di folder source
         sudo bash make.sh ../rom_mentah/extracted/ Generic Aonly
-        
-        # Kembalikan kepemilikan folder out ke user biasa agar bisa diupload oleh GitHub Actions
         sudo chmod -R 777 out/
 
-    - name: Unggah Hasil GSI ke GitHub Release
+        echo "=== Output GSI ==="
+        ls -lh out/ || true
+
+    - name: Upload ke GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         files: erfan_old/out/*.img
         tag_name: GSI-${{ github.run_number }}
-        name: Build GSI Sukses - Run #${{ github.run_number }}
+        name: GSI Build #${{ github.run_number }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
