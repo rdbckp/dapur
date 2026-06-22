@@ -24,11 +24,12 @@ jobs:
 
     - name: Unduh dan Persiapkan Skrip Erfan
       run: |
-        # Kloning repo erfan jika belum ada di repo utama loe
-        # git clone --recurse-submodules https://github.com/erfanAbdi/ErfanGSI.git erfan_old || true
-        # Sesuaikan dengan lokasi folder repo loe, misal asumsi folder erfan_old ada di root repo:
+        # Kloning repo ErfanGSI resmi langsung ke folder erfan_old
+        git clone --recurse-submodules https://github.com/erfanAbdi/ErfanGSI.git erfan_old
+        
         cd erfan_old
         chmod -R +x tools/ scripts/
+        
         # Jinakkan Python Resigner lawas biar gak SyntaxError
         sed -i 's/python3 .*ROM_resigner.*/# python3 dimatikan/g' make.sh
         sed -i 's/python .*ROM_resigner.*/# python dimatikan/g' make.sh
@@ -42,16 +43,21 @@ jobs:
     - name: Ekstrak & Bedah ROM
       run: |
         unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/ || true
-        # Logika jika mendeteksi super.img atau payload.bin bisa disisipkan di sini
-        # Contoh ekstrasi manual system.img ke tmp Erfan seperti yang kita ulik:
+        
+        # Membuat folder struktur kerja Erfan secara manual
         mkdir -p erfan_old/tmp/system
+        
+        # Logika ekstraksi manual system.img atau super.img ke tmp Erfan
         if [ -f rom_mentah/extracted/system.img ]; then
             7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
         elif [ -f rom_mentah/extracted/super.img ]; then
-            # Jika ada lpunpack di tools repo loe
+            # Menggunakan lpunpack bawaan Erfan tools untuk memecah super.img
+            chmod +x erfan_old/tools/lpunpack
             ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
             7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
         fi
+        
+        # Buat folder init cadangan agar skrip tidak error saat patching
         mkdir -p erfan_old/tmp/system/system/etc/init/
 
     - name: Mulai Proses Masak GSI (Erfan Engine)
