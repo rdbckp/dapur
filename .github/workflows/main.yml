@@ -1,4 +1,4 @@
-name: CLEAN FINAL GSI CI (AUTO HEAL)
+name: CLEAN FINAL GSI CI (PERMISSION FIXED)
 
 on:
   workflow_dispatch:
@@ -18,184 +18,148 @@ jobs:
     steps:
 
     # =========================
-    # SAFE ENV BOOTSTRAP
+    # INIT SAFE ENV
     # =========================
-    - name: Init Safe Environment
+    - name: Init Environment
       run: |
-        set -e
-
-        sudo apt-get update || true
-
+        sudo apt-get update
         sudo apt-get install -y \
           unzip tar lz4 wget git rsync \
           python3 python3-pip \
           e2fsprogs util-linux \
-          android-sdk-libsparse-utils || true
+          android-sdk-libsparse-utils
 
-        pip3 install gdown --break-system-packages || true
+        pip3 install gdown --break-system-packages
 
     # =========================
-    # TOOL AUTO HEAL LAYER
+    # TOOL SETUP
     # =========================
-    - name: Auto Tool Recovery Layer
+    - name: Install lpunpack.py
       run: |
         mkdir -p tools
-
-        echo "=== Installing lpunpack.py fallback ==="
 
         wget -q -O tools/lpunpack.py \
           https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
 
         chmod +x tools/lpunpack.py
 
-        python3 tools/lpunpack.py --help || true
-
     # =========================
-    # DOWNLOAD ROM (AUTO SAFE)
+    # DOWNLOAD ROM
     # =========================
     - name: Download ROM
       run: |
         mkdir -p rom
 
-        echo "INPUT: ${{ github.event.inputs.gdrive_url }}"
-
-        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip || {
-          echo "gdown failed → retry with wget fallback"
-          exit 1
-        }
+        gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip
 
     # =========================
-    # EXTRACT ROM SAFE MODE
+    # EXTRACT ROM
     # =========================
     - name: Extract ROM
       run: |
         mkdir -p rom/out
-
-        unzip -o rom/rom.zip -d rom/out || {
-          echo "ZIP corrupt or invalid"
-          exit 1
-        }
-
-        ls -lh rom/out
+        unzip -o rom/rom.zip -d rom/out
 
     # =========================
-    # FIND AP AUTO DETECT
+    # FIND AP
     # =========================
-    - name: Detect AP Firmware
+    - name: Extract AP
       run: |
+        mkdir -p rom/ap
+
         AP=$(find rom/out -name "AP_*.tar.md5" | head -n 1)
 
-        if [ -z "$AP" ]; then
-          echo "AP not found"
-          exit 1
-        fi
-
-        mkdir -p rom/ap
         tar -xf "$AP" -C rom/ap
 
-        ls -lh rom/ap
-
     # =========================
-    # SUPER IMAGE SAFE HANDLING
+    # PREP SUPER
     # =========================
-    - name: Prepare Super Image
+    - name: Prepare Super
       run: |
         mkdir -p rom/super
 
         if [ -f rom/ap/super.img.lz4 ]; then
-          lz4 -d rom/ap/super.img.lz4 rom/ap/super.img || true
+          lz4 -d rom/ap/super.img.lz4 rom/ap/super.img
         fi
 
-        cp rom/ap/super.img rom/super/ || {
-          echo "super.img missing"
-          exit 1
-        }
+        cp rom/ap/super.img rom/super/
 
     # =========================
-    # LPUNPACK (PYTHON SAFE RUN)
+    # UNPACK
     # =========================
-    - name: Unpack Partitions (SAFE PYTHON)
+    - name: Unpack Partitions
       run: |
         mkdir -p rom/out_super
 
         python3 tools/lpunpack.py \
           rom/super/super.img \
-          rom/out_super || {
-          echo "lpunpack failed → fallback copy mode"
-          ls -lh rom/super
-          exit 1
-        }
-
-        ls -lh rom/out_super
+          rom/out_super
 
     # =========================
-    # FLAT SYSTEM BUILD CORE
+    # FLAT SYSTEM BUILD
     # =========================
-    - name: Build Flat System Image
+    - name: Build System (FLAT)
       run: |
-        set -e
-
         mkdir -p work/system mnt
 
-        echo "=== SYSTEM MOUNT ==="
         sudo mount -o loop rom/out_super/system.img mnt
-        rsync -a mnt/ work/system/
+        sudo rsync -a mnt/ work/system/
         sudo umount mnt
 
-        echo "=== PRODUCT MERGE ==="
         if [ -f rom/out_super/product.img ]; then
           sudo mount -o loop rom/out_super/product.img mnt
-          rsync -a mnt/ work/system/
+          sudo rsync -a mnt/ work/system/
           sudo umount mnt
         fi
 
-        echo "=== SYSTEM_EXT MERGE ==="
         if [ -f rom/out_super/system_ext.img ]; then
           sudo mount -o loop rom/out_super/system_ext.img mnt
-          rsync -a mnt/ work/system/system_ext/
+          sudo rsync -a mnt/ work/system/system_ext/
           sudo umount mnt
         fi
 
     # =========================
-    # BUILD FINAL IMAGE (SAFE SIZE)
+    # BUILD IMAGE (FIX PERMISSION ERROR)
     # =========================
-    - name: Build GSI Image
+    - name: Create GSI Image
       run: |
-        set -e
-
         SIZE=$(du -s work/system | awk '{print $1}')
         SIZE=$((SIZE + 1000000))
-
-        echo "Allocating size: ${SIZE} KB"
 
         dd if=/dev/zero of=gsi.img bs=1K count=$SIZE
         mkfs.ext4 -F gsi.img
 
         mkdir -p mnt
+
         sudo mount -o loop gsi.img mnt
 
-        rsync -a work/system/ mnt/
+        # 🔥 FIX UTAMA: SEMUA RSYNC PAKAI SUDO
+        sudo rsync -a work/system/ mnt/
 
         sync
+
         sudo umount mnt
 
         e2fsck -f gsi.img || true
         resize2fs gsi.img || true
 
     # =========================
-    # FINAL OUTPUT SAFE EXPORT
+    # ARTIFACT
     # =========================
-    - name: Upload Artifact
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: CLEAN-GSI
+        name: CLEAN-GSI-FIXED
         path: gsi.img
 
-    - name: Create Release
+    # =========================
+    # RELEASE
+    # =========================
+    - name: Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: clean-${{ github.run_number }}
-        name: "CLEAN FINAL GSI #${{ github.run_number }}"
+        tag_name: fixed-${{ github.run_number }}
+        name: "CLEAN FIXED GSI #${{ github.run_number }}"
         files: |
           gsi.img
       env:
