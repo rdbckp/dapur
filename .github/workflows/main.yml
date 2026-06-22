@@ -19,7 +19,7 @@ jobs:
     - name: Setup Lingkungan Kerja & Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip brotli Simg2img
+        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools python3-pip brotli simg2img
         pip3 install gdown pyelftools
 
     - name: Unduh Skrip Erfan via Repo ErfanoAbdi
@@ -55,6 +55,9 @@ jobs:
         cd erfan_old
         # WAJIB pakai sudo agar skrip bisa melakukan mount/ekstraksi filesystem img murni
         sudo bash make.sh ../rom_mentah/extracted/ Generic Aonly
+        
+        # JAMU KHUSUS: Kembalikan kepemilikan folder out ke user biasa agar bisa diupload oleh GitHub Actions
+        sudo chmod -R 777 out/
 
     - name: Unggah Hasil GSI ke GitHub Release
       uses: softprops/action-gh-release@v2
