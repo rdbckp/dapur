@@ -123,11 +123,11 @@ jobs:
 
           # Cek sparse image (magic 0xed26ff3a little-endian)
           MAGIC=$(python3 -c "
-import struct
-with open('$IMG','rb') as f:
-    b = f.read(4)
-print(hex(struct.unpack('<I',b)[0]))
-" 2>/dev/null)
+            import struct
+            with open('$IMG','rb') as f:
+                b = f.read(4)
+            print(hex(struct.unpack('<I',b)[0]))
+            " 2>/dev/null)
           if [ "$MAGIC" = "0xed26ff3a" ]; then
             echo "  → sparse, convert ke raw..."
             simg2img "$IMG" "${IMG}.raw"
