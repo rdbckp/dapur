@@ -1,14 +1,12 @@
-name: A02 Flat System GSI Builder
+name: A02 Flat GSI Builder (Stable Final)
 
 on:
   workflow_dispatch:
     inputs:
       gdrive_url:
-        description: 'Masukkan Link Google Drive ROM Target'
+        description: 'Masukkan Google Drive File ID atau Link UC'
         required: true
-        default: 'https://drive.google.com/file/d/1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG/view?usp=drive_link'
-
-
+        default: '1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG'
 
 permissions:
   contents: write
@@ -19,96 +17,131 @@ jobs:
 
     steps:
 
+    # =========================
+    # INIT
+    # =========================
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install Tools
+    - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          unzip tar lz4 \
-          e2fsprogs rsync \
-          android-sdk-libsparse-utils \
-          util-linux
+          unzip tar lz4 rsync wget \
+          e2fsprogs util-linux \
+          android-sdk-libsparse-utils
 
         pip3 install gdown --break-system-packages
 
-    # =====================
-    # DOWNLOAD
-    # =====================
+    # =========================
+    # INSTALL LPUNPACK (FIX ERROR 127)
+    # =========================
+    - name: Install lpunpack
+      run: |
+        wget -O /usr/local/bin/lpunpack \
+          https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack
+
+        chmod +x /usr/local/bin/lpunpack
+
+        lpunpack --help || true
+
+    # =========================
+    # DOWNLOAD ROM
+    # =========================
     - name: Download ROM
       run: |
         mkdir -p rom
+
+        echo "Using input: ${{ github.event.inputs.gdrive_url }}"
+
         gdown "${{ github.event.inputs.gdrive_url }}" -O rom/rom.zip
 
-    # =====================
-    # EXTRACT
-    # =====================
+    # =========================
+    # EXTRACT ROM
+    # =========================
     - name: Extract ROM
       run: |
         mkdir -p rom/out
         unzip -o rom/rom.zip -d rom/out
+        ls -lh rom/out
 
-    # =====================
+    # =========================
     # EXTRACT AP
-    # =====================
+    # =========================
     - name: Extract AP
       run: |
         mkdir -p rom/ap
-        AP=$(ls rom/out/AP_*.tar.md5 | head -n 1)
-        tar -xf "$AP" -C rom/ap
 
-    # =====================
-    # HANDLE SYSTEM BASE
-    # =====================
-    - name: Prepare Base System
+        AP=$(ls rom/out/AP_*.tar.md5 | head -n 1)
+
+        if [ -z "$AP" ]; then
+          echo "AP file not found!"
+          exit 1
+        fi
+
+        tar -xf "$AP" -C rom/ap
+        ls -lh rom/ap
+
+    # =========================
+    # PREP SUPER
+    # =========================
+    - name: Prepare Super Image
       run: |
-        mkdir -p work/system mnt
+        mkdir -p rom/super
 
         if [ -f rom/ap/super.img.lz4 ]; then
           lz4 -d rom/ap/super.img.lz4 rom/ap/super.img
         fi
 
-        cp rom/ap/super.img rom/
+        cp rom/ap/super.img rom/super/
 
-        lpunpack rom/super.img rom/out_super
+    # =========================
+    # UNPACK SUPER
+    # =========================
+    - name: Unpack Partitions
+      run: |
+        mkdir -p rom/out_super
 
+        lpunpack rom/super/super.img rom/out_super
+
+        echo "=== PARTITIONS ==="
+        ls -lh rom/out_super
+
+    # =========================
+    # FLATTEN SYSTEM (CORE LOGIC)
+    # =========================
+    - name: Build Flat System GSI
+      run: |
+        mkdir -p work/system mnt final
+
+        echo "=== MOUNT SYSTEM ==="
         sudo mount -o loop rom/out_super/system.img mnt
         rsync -a mnt/ work/system/
         sudo umount mnt
 
-    # =====================
-    # FLATTEN PRODUCT + SYSTEM_EXT
-    # =====================
-    - name: Merge Product + SystemExt
-      run: |
-        echo "=== FLATTEN INTO SYSTEM ==="
-
-        # product
-        if [ -d rom/out_super/product.img ]; then
-          mkdir -p mnt
+        echo "=== ADD PRODUCT ==="
+        if [ -f rom/out_super/product.img ]; then
           sudo mount -o loop rom/out_super/product.img mnt
           rsync -a mnt/ work/system/
           sudo umount mnt
         fi
 
-        # system_ext
-        if [ -d rom/out_super/system_ext.img ]; then
-          mkdir -p mnt
+        echo "=== ADD SYSTEM_EXT ==="
+        if [ -f rom/out_super/system_ext.img ]; then
           sudo mount -o loop rom/out_super/system_ext.img mnt
           rsync -a mnt/ work/system/system_ext/
           sudo umount mnt
         fi
 
-    # =====================
-    # BUILD NEW SYSTEM IMAGE
-    # =====================
-    - name: Build System Image (FLAT GSI)
+    # =========================
+    # BUILD IMAGE
+    # =========================
+    - name: Create GSI Image
       run: |
-        echo "=== BUILDING FLAT SYSTEM IMAGE ==="
+        echo "=== BUILDING IMAGE ==="
 
         SIZE=$(du -s work/system | awk '{print $1}')
-        SIZE=$((SIZE + 800000))
+        SIZE=$((SIZE + 900000))
 
         dd if=/dev/zero of=gsi.img bs=1K count=$SIZE
         mkfs.ext4 -F gsi.img
@@ -124,20 +157,23 @@ jobs:
         e2fsck -f gsi.img || true
         resize2fs gsi.img || true
 
-    # =====================
-    # RELEASE
-    # =====================
+    # =========================
+    # ARTIFACT
+    # =========================
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: flat-gsi
         path: gsi.img
 
+    # =========================
+    # RELEASE
+    # =========================
     - name: Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: flat-${{ github.run_number }}
-        name: "FLAT A02 GSI #${{ github.run_number }}"
+        tag_name: gsi-flat-${{ github.run_number }}
+        name: "A02 FLAT GSI #${{ github.run_number }}"
         files: |
           gsi.img
       env:
