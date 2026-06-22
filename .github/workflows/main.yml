@@ -1,0 +1,69 @@
+name: GSI Baker Manual Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      gdrive_url:
+        description: 'Masukkan Link Google Drive ROM Target'
+        required: true
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Lingkungan Kerja & Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y p7zip-full aria2 libguestfs-tools squashfs-tools py-elftools
+        pip install gdown
+
+    - name: Unduh dan Persiapkan Skrip Erfan
+      run: |
+        # Kloning repo erfan jika belum ada di repo utama loe
+        # git clone --recurse-submodules https://github.com/erfanAbdi/ErfanGSI.git erfan_old || true
+        # Sesuaikan dengan lokasi folder repo loe, misal asumsi folder erfan_old ada di root repo:
+        cd erfan_old
+        chmod -R +x tools/ scripts/
+        # Jinakkan Python Resigner lawas biar gak SyntaxError
+        sed -i 's/python3 .*ROM_resigner.*/# python3 dimatikan/g' make.sh
+        sed -i 's/python .*ROM_resigner.*/# python dimatikan/g' make.sh
+
+    - name: Download ROM Target via GDown
+      run: |
+        mkdir -p rom_mentah
+        # Menggunakan gdown untuk download link GDrive dari input user
+        gdown "${{ github.event.inputs.gdrive_url }}" -O rom_mentah/target_rom.zip
+
+    - name: Ekstrak & Bedah ROM
+      run: |
+        unzip rom_mentah/target_rom.zip -d rom_mentah/extracted/ || true
+        # Logika jika mendeteksi super.img atau payload.bin bisa disisipkan di sini
+        # Contoh ekstrasi manual system.img ke tmp Erfan seperti yang kita ulik:
+        mkdir -p erfan_old/tmp/system
+        if [ -f rom_mentah/extracted/system.img ]; then
+            7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
+        elif [ -f rom_mentah/extracted/super.img ]; then
+            # Jika ada lpunpack di tools repo loe
+            ./erfan_old/tools/lpunpack rom_mentah/extracted/super.img rom_mentah/extracted/
+            7z x rom_mentah/extracted/system.img -oerfan_old/tmp/system/
+        fi
+        mkdir -p erfan_old/tmp/system/system/etc/init/
+
+    - name: Mulai Proses Masak GSI (Erfan Engine)
+      run: |
+        cd erfan_old
+        bash make.sh ../rom_mentah/extracted/ Generic Aonly
+
+    - name: Unggah Hasil GSI ke GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: erfan_old/out/*.img
+        tag_name: GSI-${{ github.run_number }}
+        name: Build GSI Sukses - Run #${{ github.run_number }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
