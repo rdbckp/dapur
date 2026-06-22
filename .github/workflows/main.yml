@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       gdrive_url:
-        description: 'Google Drive ROM Samsung'
+        description: 'Masukkan Link Google Drive ROM Target'
         required: true
+        default: 'https://drive.google.com/file/d/1nnqjYQ4glxDT8soNPop1vu3qBsA8tvaG/view?usp=drive_link'
 
 permissions:
   contents: write
