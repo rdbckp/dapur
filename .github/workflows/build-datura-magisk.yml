@@ -33,9 +33,13 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
+          # PENTING: actions/setup-java bikin versi yang PALING TERAKHIR ditulis
+          # jadi default (JAVA_HOME). Makanya 11 harus ditulis duluan, 17 belakangan,
+          # biar JAVA_HOME default = 17 (buat sdkmanager), dan JDK 11 tetep bisa
+          # diakses lewat JAVA_HOME_11_X64 (dipakai eksplisit di step gradle build).
           java-version: |
-            17
             11
+            17
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
