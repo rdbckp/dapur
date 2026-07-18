@@ -1,0 +1,6 @@
+id=datura_firewall_crdroid
+name=Datura Firewall (crDroid A11 port)
+version=v1.0
+versionCode=1
+author=Brooooohhhh
+description=CalyxOS Datura Firewall app, di-priv-app-kan buat crDroid Android 11 (Redmi 9A hybrid ROM). Manggil API setUidPolicy() bawaan AOSP/LineageOS yang udah ada di frameworks/base dan system/netd stock crDroid -- gak ada modifikasi ROM.
